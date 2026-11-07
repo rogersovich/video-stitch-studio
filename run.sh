@@ -128,10 +128,10 @@ echo ""
 echo "⚡ [3/3] Menjalankan Server & UI..."
 cd "$BACKEND_DIR"
 if [ "$USE_PYTHON_VENV" -eq 1 ]; then
-    uvicorn app:app --host 127.0.0.1 --port 8000 --reload &
+    uvicorn app:app --host 127.0.0.1 --port 8000 &
     BACKEND_PID=$!
 else
-    "$UV_BIN" run uvicorn app:app --host 127.0.0.1 --port 8000 --reload &
+    "$UV_BIN" run uvicorn app:app --host 127.0.0.1 --port 8000 &
     BACKEND_PID=$!
 fi
 

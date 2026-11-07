@@ -172,6 +172,14 @@ def probe_file(file_path: str) -> Dict[str, Any]:
     audio_channels = int(audio_stream.get("channels") or 0) if audio_stream else 0
     audio_sample_rate = int(audio_stream.get("sample_rate") or 0) if audio_stream else 0
 
+    encoder_name = (
+        video_stream.get("tags", {}).get("encoder") or
+        fmt.get("tags", {}).get("encoder") or
+        ""
+    )
+    extradata_size = int(video_stream.get("extradata_size") or 0)
+    codec_tag_string = video_stream.get("codec_tag_string") or ""
+
     return {
         "file_path": file_path,
         "filename": os.path.basename(file_path),
@@ -195,6 +203,9 @@ def probe_file(file_path: str) -> Dict[str, Any]:
         "audio_codec": audio_codec,
         "audio_channels": audio_channels,
         "audio_sample_rate": audio_sample_rate,
+        "encoder": encoder_name,
+        "extradata_size": extradata_size,
+        "codec_tag_string": codec_tag_string,
         "error": None
     }
 
@@ -263,6 +274,28 @@ def validate_merge_compatibility(files_meta: List[Dict[str, Any]]) -> Dict[str, 
                 f"Perbedaan Audio: File #{idx} ({name}) audio adalah {f['audio_codec']} sedangkan File #1 adalah {base_acodec}."
             )
 
+        # Check hardware encoder / bitstream parameter sets
+        base_enc = first.get("encoder", "").lower()
+        f_enc = f.get("encoder", "").lower()
+        base_extra = first.get("extradata_size", 0)
+        f_extra = f.get("extradata_size", 0)
+
+        is_vt_1 = "videotoolbox" in base_enc
+        is_vt_2 = "videotoolbox" in f_enc
+        is_nv_1 = "nvenc" in base_enc
+        is_nv_2 = "nvenc" in f_enc
+
+        if (is_vt_1 != is_vt_2) or (is_nv_1 != is_nv_2):
+            enc1_desc = "Apple VideoToolbox (Mac)" if is_vt_1 else ("NVIDIA NVENC" if is_nv_1 else (base_enc or "Lainnya"))
+            enc2_desc = "Apple VideoToolbox (Mac)" if is_vt_2 else ("NVIDIA NVENC" if is_nv_2 else (f_enc or "Lainnya"))
+            issues.append(
+                f"Perbedaan Hardware Encoder: File #1 memakai {enc1_desc} sedangkan File #{idx} ({name}) memakai {enc2_desc}. Parameter bitstream berbeda, wajib gunakan Mode Re-encode agar video tidak freeze/glitch di titik transisi."
+            )
+        elif base_extra > 0 and f_extra > 0 and abs(base_extra - f_extra) > 4:
+            issues.append(
+                f"Perbedaan Parameter Bitstream: Header extradata File #{idx} ({f_extra}B) berbeda dari File #1 ({base_extra}B). Wajib gunakan Mode Re-encode agar video tidak glitch saat transisi."
+            )
+
     can_instant_copy = len(issues) == 0
 
     if can_instant_copy:
@@ -286,8 +319,8 @@ def validate_merge_compatibility(files_meta: List[Dict[str, Any]]) -> Dict[str, 
         return {
             "can_instant_copy": False,
             "badge": "warning",
-            "badge_label": "Perlu Re-encode (Beda Parameter)",
-            "message": "Video memiliki perbedaan FPS/Resolusi/Codec. Disarankan melakukan standarisasi compress dulu atau merge akan menggunakan mode re-encode agar tidak desync.",
+            "badge_label": "Perlu Re-encode (Beda Parameter / Encoder)",
+            "message": "Sistem mendeteksi perbedaan parameter video atau encoder hardware antar part. Gunakan Mode Re-encode Terstandarisasi agar video tersambung mulus 100% tanpa glitch atau freeze!",
             "issues": issues,
             "recommended_mode": "reencode",
             "total_duration_sec": total_duration,

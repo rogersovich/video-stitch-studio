@@ -10,6 +10,8 @@ import uuid
 import asyncio
 import platform
 import subprocess
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 from typing import Dict, List, Any, Optional
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -121,7 +123,7 @@ class BrowseRequest(BaseModel):
 
 
 def locate_file_on_system(filename: str, size: Optional[int] = None) -> Optional[str]:
-    """Resolves local absolute path for dropped files using fast local index/mdfind."""
+    """Resolves local absolute path for dropped files using fast local index, recent folders, and mdfind."""
     if os.path.isabs(filename) and os.path.exists(filename):
         return filename
 
@@ -136,14 +138,43 @@ def locate_file_on_system(filename: str, size: Optional[int] = None) -> Optional
         os.getcwd(),
     ]
 
-    # Quick direct check in common directories
+    # 1. Quick direct check in standard user directories
     for d in common_dirs:
         candidate = os.path.join(d, filename)
         if os.path.exists(candidate):
-            if size is None or abs(os.path.getsize(candidate) - size) < 2048:
+            if size is None or abs(os.path.getsize(candidate) - size) < 4096:
                 return candidate
 
-    # On macOS, use mdfind (Spotlight) - ultra fast (~10ms)
+    # 2. On Windows: check Recent folders (parses shortcuts from %APPDATA%\Microsoft\Windows\Recent)
+    if sys_os == "Windows":
+        recent_dir = os.path.join(os.environ.get("APPDATA", ""), r"Microsoft\Windows\Recent")
+        if os.path.exists(recent_dir):
+            import glob, re
+            candidate_dirs = set()
+            try:
+                for lnk in glob.glob(os.path.join(recent_dir, "*.lnk")):
+                    try:
+                        with open(lnk, "rb") as f:
+                            data = f.read(2048)
+                        matches = re.findall(b"[A-Za-z]:\\\\[a-zA-Z0-9_ -]+(?:\\\\[a-zA-Z0-9_ -]+)*", data)
+                        for m in matches:
+                            s = m.decode("latin1", errors="ignore")
+                            if os.path.isdir(s):
+                                candidate_dirs.add(s)
+                            elif os.path.isfile(s):
+                                candidate_dirs.add(os.path.dirname(s))
+                    except Exception:
+                        continue
+            except Exception:
+                pass
+
+            for cd in candidate_dirs:
+                cand = os.path.join(cd, filename)
+                if os.path.exists(cand):
+                    if size is None or abs(os.path.getsize(cand) - size) < 4096:
+                        return cand
+
+    # 3. On macOS: use mdfind (Spotlight) - ultra fast (~10ms)
     if sys_os == "Darwin":
         try:
             res = subprocess.run(
@@ -156,7 +187,7 @@ def locate_file_on_system(filename: str, size: Optional[int] = None) -> Optional
             candidates = [l.strip() for l in res.stdout.splitlines() if l.strip() and os.path.exists(l.strip())]
             if candidates:
                 if size:
-                    size_matched = [p for p in candidates if abs(os.path.getsize(p) - size) < 2048]
+                    size_matched = [p for p in candidates if abs(os.path.getsize(p) - size) < 4096]
                     if size_matched:
                         size_matched.sort(key=lambda p: os.path.getmtime(p), reverse=True)
                         return size_matched[0]
@@ -175,14 +206,16 @@ async def locate_files(req: LocateFilesRequest):
     """
     Finds exact absolute filesystem path for files dropped from OS Finder/Explorer.
     """
-    results = []
-    for f in req.files:
-        path = locate_file_on_system(f.name, f.size)
-        if path:
-            results.append({"name": f.name, "found": True, "path": path})
-        else:
-            results.append({"name": f.name, "found": False, "path": None})
-    return {"results": results}
+    def _do_locate():
+        results = []
+        for f in req.files:
+            path = locate_file_on_system(f.name, f.size)
+            if path:
+                results.append({"name": f.name, "found": True, "path": path})
+            else:
+                results.append({"name": f.name, "found": False, "path": None})
+        return {"results": results}
+    return await asyncio.to_thread(_do_locate)
 
 
 @app.get("/api/health")
@@ -196,17 +229,19 @@ async def health_check():
 
 @app.get("/api/hardware")
 async def get_hardware():
-    return detect_hardware()
+    return await asyncio.to_thread(detect_hardware)
 
 
 @app.post("/api/probe")
 async def probe_media(req: ProbeRequest):
-    results = [probe_file(p) for p in req.paths]
-    validation = validate_merge_compatibility(results) if len(results) > 0 else None
-    return {
-        "files": results,
-        "merge_validation": validation
-    }
+    def _do_probe():
+        results = [probe_file(p) for p in req.paths]
+        validation = validate_merge_compatibility(results) if len(results) > 0 else None
+        return {
+            "files": results,
+            "merge_validation": validation
+        }
+    return await asyncio.to_thread(_do_probe)
 
 
 @app.post("/api/suggest-naming")
@@ -224,30 +259,25 @@ async def suggest_naming(req: NamingSuggestRequest):
         return {"suggested_filename": suggested}
 
 
-@app.post("/api/browse")
-async def browse_dialog(req: BrowseRequest):
-    """
-    Opens native OS file picker or directory picker dialog.
-    Returns list of chosen paths or directory path.
-    """
+def _run_browse_dialog(browse_type: str, prompt: Optional[str]) -> List[str]:
     sys_os = platform.system()
     chosen_paths = []
 
     if sys_os == "Darwin":
         # macOS osascript
-        if req.type == "directory":
+        if browse_type == "directory":
             osa = f'''
             try
-                set sel to choose folder with prompt "{req.prompt or 'Pilih Folder Tujuan'}"
+                set sel to choose folder with prompt "{prompt or 'Pilih Folder Tujuan'}"
                 return POSIX path of sel
             on error
                 return ""
             end try
             '''
-        elif req.type == "multiple_files":
+        elif browse_type == "multiple_files":
             osa = f'''
             try
-                set sel to choose file with prompt "{req.prompt or 'Pilih File Video'}" of type {{"mp4", "mov", "m4v", "mkv", "avi"}} with multiple selections allowed
+                set sel to choose file with prompt "{prompt or 'Pilih File Video'}" of type {{"mp4", "mov", "m4v", "mkv", "avi"}} with multiple selections allowed
                 set res to ""
                 repeat with f in sel
                     set res to res & POSIX path of f & linefeed
@@ -260,7 +290,7 @@ async def browse_dialog(req: BrowseRequest):
         else:
             osa = f'''
             try
-                set sel to choose file with prompt "{req.prompt or 'Pilih File Video'}" of type {{"mp4", "mov", "m4v", "mkv", "avi"}}
+                set sel to choose file with prompt "{prompt or 'Pilih File Video'}" of type {{"mp4", "mov", "m4v", "mkv", "avi"}}
                 return POSIX path of sel
             on error
                 return ""
@@ -272,29 +302,36 @@ async def browse_dialog(req: BrowseRequest):
             if output:
                 lines = [l.strip() for l in output.splitlines() if l.strip()]
                 chosen_paths = lines
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Failed to open file picker: {str(e)}")
+        except Exception:
+            pass
 
     elif sys_os == "Windows":
-        # PowerShell dialog
-        if req.type == "directory":
-            ps_script = """
+        # PowerShell dialog with TopMost owner form so it never hides behind windows
+        desc = prompt or "Pilih Folder"
+        if browse_type == "directory":
+            ps_script = f"""
             Add-Type -AssemblyName System.Windows.Forms
             $f = New-Object System.Windows.Forms.FolderBrowserDialog
-            $f.Description = 'Select Folder'
-            if ($f.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+            $f.Description = '{desc}'
+            $top = New-Object System.Windows.Forms.Form
+            $top.TopMost = $true
+            if ($f.ShowDialog($top) -eq [System.Windows.Forms.DialogResult]::OK) {{
                 Write-Output $f.SelectedPath
-            }
+            }}
+            $top.Dispose()
             """
-        elif req.type == "multiple_files":
+        elif browse_type == "multiple_files":
             ps_script = """
             Add-Type -AssemblyName System.Windows.Forms
             $f = New-Object System.Windows.Forms.OpenFileDialog
             $f.Filter = 'Video Files (*.mp4;*.mov;*.mkv;*.m4v)|*.mp4;*.mov;*.mkv;*.m4v|All files (*.*)|*.*'
             $f.Multiselect = $true
-            if ($f.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+            $top = New-Object System.Windows.Forms.Form
+            $top.TopMost = $true
+            if ($f.ShowDialog($top) -eq [System.Windows.Forms.DialogResult]::OK) {
                 $f.FileNames | ForEach-Object { Write-Output $_ }
             }
+            $top.Dispose()
             """
         else:
             ps_script = """
@@ -302,9 +339,12 @@ async def browse_dialog(req: BrowseRequest):
             $f = New-Object System.Windows.Forms.OpenFileDialog
             $f.Filter = 'Video Files (*.mp4;*.mov;*.mkv;*.m4v)|*.mp4;*.mov;*.mkv;*.m4v|All files (*.*)|*.*'
             $f.Multiselect = $false
-            if ($f.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+            $top = New-Object System.Windows.Forms.Form
+            $top.TopMost = $true
+            if ($f.ShowDialog($top) -eq [System.Windows.Forms.DialogResult]::OK) {
                 Write-Output $f.FileName
             }
+            $top.Dispose()
             """
         try:
             res = subprocess.run(["powershell", "-NoProfile", "-Command", ps_script], stdout=subprocess.PIPE, text=True, check=False)
@@ -312,9 +352,19 @@ async def browse_dialog(req: BrowseRequest):
             if output:
                 lines = [l.strip() for l in output.splitlines() if l.strip()]
                 chosen_paths = lines
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Failed to open Windows file picker: {str(e)}")
+        except Exception:
+            pass
 
+    return chosen_paths
+
+
+@app.post("/api/browse")
+async def browse_dialog(req: BrowseRequest):
+    """
+    Opens native OS file picker or directory picker dialog asynchronously.
+    Runs off-thread so it NEVER blocks the asyncio event loop!
+    """
+    chosen_paths = await asyncio.to_thread(_run_browse_dialog, req.type, req.prompt)
     return {"paths": chosen_paths}
 
 
@@ -390,12 +440,9 @@ async def get_job_status(job_id: str):
     raise HTTPException(status_code=404, detail="Job ID not found.")
 
 
-@app.post("/api/reveal")
-async def reveal_file(req: RevealRequest):
-    """Reveals the given file in Finder (macOS) or File Explorer (Windows)."""
-    target = os.path.abspath(req.path)
+def _run_reveal(path: str) -> Dict[str, Any]:
+    target = os.path.abspath(path)
     if not os.path.exists(target):
-        # If output file doesn't exist yet, try revealing parent directory
         parent = os.path.dirname(target)
         if os.path.exists(parent):
             target = parent
@@ -417,8 +464,16 @@ async def reveal_file(req: RevealRequest):
         else:
             subprocess.run(["xdg-open", os.path.dirname(target)], check=False)
         return {"success": True, "revealed": target}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to reveal file: {str(e)}")
+
+
+@app.post("/api/reveal")
+async def reveal_file(req: RevealRequest):
+    """Reveals the given file in Finder (macOS) or File Explorer (Windows) off-thread."""
+    return await asyncio.to_thread(_run_reveal, req.path)
 
 
 # --- WebSocket Endpoint ---
@@ -440,4 +495,4 @@ async def websocket_endpoint(websocket: WebSocket):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("app:app", host="127.0.0.1", port=8000, reload=True)
+    uvicorn.run("app:app", host="127.0.0.1", port=8000, reload=False)

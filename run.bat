@@ -38,7 +38,7 @@ if %errorlevel% equ 0 (
         uv venv
     )
     uv pip install fastapi "uvicorn[standard]" websockets pydantic python-multipart
-    set "RUN_BACKEND=uv run uvicorn app:app --host 127.0.0.1 --port 8000 --reload"
+    set "RUN_BACKEND=.venv\Scripts\python.exe -m uvicorn app:app --host 127.0.0.1 --port 8000"
 ) else (
     echo uv tidak terdeteksi, menggunakan python default...
     if not exist .venv (
@@ -47,7 +47,7 @@ if %errorlevel% equ 0 (
     call .venv\Scripts\activate.bat
     python -m pip install --upgrade pip
     pip install fastapi "uvicorn[standard]" websockets pydantic python-multipart
-    set "RUN_BACKEND=uvicorn app:app --host 127.0.0.1 --port 8000 --reload"
+    set "RUN_BACKEND=uvicorn app:app --host 127.0.0.1 --port 8000"
 )
 
 :: 4. Setup Frontend
@@ -61,7 +61,7 @@ if not exist node_modules (
 
 :: 5. Launch Backend & Frontend
 echo.
-echo [3/3] Menjalankan Server & UI...
+echo [3/3] Menjalankan Server ^& UI...
 
 :: Start Backend in background window
 start "Video Stitch Studio - Backend API" cmd /k "cd /d %~dp0backend && %RUN_BACKEND%"

@@ -108,7 +108,7 @@ Cukup jalankan script launcher di terminal:
 ---
 
 ### 🪟 Windows
-Double-click file `run.bat` atau jalankan via Command Prompt / PowerShell:
+Jalankan melalui PowerShell (rekomendasi): `.\run.ps1` atau double-click `run.bat`:
 ```cmd
 run.bat
 ```

@@ -330,14 +330,18 @@ class CompressionJob:
             return {"success": True, "output_path": self.output_path, "probe": out_probe}
 
         except Exception as e:
+            import traceback
+            err_desc = f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
+            print(f"[COMPRESSOR ERROR] Exception in job {self.job_id}: {err_desc}", flush=True)
+            traceback.print_exc()
             self.status = "failed"
             if self.progress_callback:
                 await self.progress_callback({
                     "job_id": self.job_id,
                     "status": "failed",
-                    "error": str(e)
+                    "error": err_desc
                 })
-            return {"success": False, "error": str(e)}
+            return {"success": False, "error": err_desc}
 
     def cancel(self):
         self.is_cancelled = True

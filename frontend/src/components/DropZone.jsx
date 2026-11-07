@@ -65,6 +65,9 @@ export default function DropZone({
     // 3. In web browsers (Chrome/Safari), browser security conceals full host path.
     // Automatically resolve the absolute path in milliseconds via backend system index/Spotlight!
     setIsLocating(true);
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 4000);
+
     try {
       const payload = {
         files: files.map((f) => ({
@@ -77,8 +80,10 @@ export default function DropZone({
       const res = await fetch('/api/locate-file', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
+        body: JSON.stringify(payload),
+        signal: controller.signal
       });
+      clearTimeout(timeoutId);
       const data = await res.json();
 
       const foundPaths = (data.results || [])
@@ -91,12 +96,13 @@ export default function DropZone({
       } else {
         // File not indexed or on external volume
         setLocateError(
-          `File "${files[0].name}" tidak ditemukan di folder umum/Spotlight. Silakan gunakan tombol "Pilih File" di bawah untuk memilih file.`
+          `File "${files[0].name}" tidak terdeteksi otomatis. Silakan gunakan tombol "Pilih File" di bawah untuk memilih langsung via File Explorer.`
         );
       }
     } catch (err) {
+      clearTimeout(timeoutId);
       console.error('Locate file error:', err);
-      setLocateError('Gagal mendeteksi lokasi file secara otomatis. Silakan klik tombol "Pilih File".');
+      setLocateError('Deteksi lokasi file membutuhkan waktu. Silakan klik tombol "Pilih File (Finder / Explorer)" di bawah.');
     } finally {
       setIsLocating(false);
     }
@@ -171,6 +177,16 @@ export default function DropZone({
             ? 'Membaca metadata dan direktori file lokal...'
             : subtitle}
         </p>
+
+        {isLocating && (
+          <button
+            type="button"
+            onClick={() => setIsLocating(false)}
+            className="mb-3 px-3 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-[11px] font-medium border border-slate-700/60 transition-colors"
+          >
+            Batal Deteksi
+          </button>
+        )}
 
         {locateError && (
           <div className="mb-4 p-3 rounded-xl bg-amber-950/40 border border-amber-500/30 text-amber-200 text-xs flex items-center gap-2 max-w-md text-left">

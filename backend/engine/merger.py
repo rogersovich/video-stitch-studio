@@ -111,8 +111,19 @@ class MergeJob:
             else:
                 encoder_flags = ["-c:v", "libx264", "-crf", "22", "-preset", "medium"]
 
-            # Filter for 2K (2560x1440) 30 FPS constant
-            vf_filter = "scale=2560:1440:force_original_aspect_ratio=decrease,pad=2560:1440:(ow-iw)/2:(oh-ih)/2,fps=30"
+            # Determine target resolution: avoid unwanted upscaling if all parts are 1080p or smaller
+            max_w = max((f.get("width", 0) for f in probed_files), default=2560)
+            max_h = max((f.get("height", 0) for f in probed_files), default=1440)
+            if max_w <= 1920 and max_h <= 1080:
+                target_w, target_h = 1920, 1080
+            else:
+                target_w, target_h = 2560, 1440
+
+            vf_filter = f"scale={target_w}:{target_h}:force_original_aspect_ratio=decrease,pad={target_w}:{target_h}:(ow-iw)/2:(oh-ih)/2,fps=30"
+
+            # Check if all audio codecs match AAC with same sample rate -> stream copy audio for maximum speed!
+            all_aac = all(f.get("audio_codec") == "aac" and f.get("audio_sample_rate") == probed_files[0].get("audio_sample_rate") for f in probed_files)
+            audio_flags = ["-c:a", "copy"] if all_aac else ["-c:a", "aac", "-b:a", "192k", "-ar", "48000"]
 
             cmd = [
                 ffmpeg_bin,
@@ -123,9 +134,7 @@ class MergeJob:
                 "-vf", vf_filter,
                 *encoder_flags,
                 "-pix_fmt", "yuv420p",
-                "-c:a", "aac",
-                "-b:a", "192k",
-                "-ar", "48000",
+                *audio_flags,
                 "-movflags", "+faststart",
                 "-progress", "pipe:1",
                 "-nostats",
@@ -263,10 +272,11 @@ class MergeJob:
             return {"success": True, "output_path": self.output_path, "probe": out_probe, "mode": selected_mode}
 
         except Exception as e:
+            err_desc = f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
             self.status = "failed"
             if self.progress_callback:
-                await self.progress_callback({"job_id": self.job_id, "status": "failed", "error": str(e)})
-            return {"success": False, "error": str(e)}
+                await self.progress_callback({"job_id": self.job_id, "status": "failed", "error": err_desc})
+            return {"success": False, "error": err_desc}
 
     def cancel(self):
         self.is_cancelled = True

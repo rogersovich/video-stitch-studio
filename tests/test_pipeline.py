@@ -110,7 +110,7 @@ async def run_tests():
 
     # Clean up test videos
     shutil.rmtree(test_dir, ignore_errors=True)
-    print("\n🎉 ALL PIPELINE TESTS PASSED SUCCESSFULLY! 🎉")
+    print("\n[SUCCESS] ALL PIPELINE TESTS PASSED SUCCESSFULLY!")
 
 
 if __name__ == "__main__":
